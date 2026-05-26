@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     ERP_BASE_URL: str = "http://localhost:8000"
     ERP_USERNAME: str = ""
     ERP_PASSWORD: str = ""
-    ERP_DB_URL: str = "postgresql://user:password@localhost:5432/erp_db_name"
+    ERP_DB_URL: str = ""
 
     # Redis
     REDIS_HOST: str = "localhost"

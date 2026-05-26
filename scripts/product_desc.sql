@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS products (
+CREATE TABLE IF NOT EXISTS ai_product_shopify  (
     id SERIAL PRIMARY KEY,
     handle VARCHAR(255) NOT NULL,
     title VARCHAR(500),
