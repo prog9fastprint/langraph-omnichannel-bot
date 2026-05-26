@@ -1,0 +1,14 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+httpx>=0.24.0
+langchain>=0.1.0
+langchain-google-genai>=0.0.5
+langgraph>=0.0.20
+python-dotenv>=1.0.0
+redis>=5.0.0
+python-multipart>=0.0.6
+langgraph-checkpoint-redis>=0.0.2
+langgraph-checkpoint-postgres>=0.0.2
+pydantic-settings>=2.0.0
+pydantic-settings>=2.0.0

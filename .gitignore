@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+
+# Virtual environment
+venv/
+.venv/
+
+# Editor directories and files
+.vscode/*
+!.vscode/settings.json # Keep specific VS Code settings if needed
+.idea/
+*.swp
+*.bak
+*.swo
+*~
+.DS_Store
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# MyPy
+.mypy_cache/
+
+# Pytest
+.pytest_cache/
+htmlcov/

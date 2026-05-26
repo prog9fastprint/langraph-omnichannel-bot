@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # FastAPI Application Service
+  fastapi-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app  # Mount the current directory into the container
+    env_file:
+      - ./.env # Load environment variables from .env file
+    depends_on:
+      - redis
+    networks:
+      - chatbot-network
+
+  # Redis Service
+  redis:
+    image: "redis:7.2.4-alpine" # Lightweight Redis image
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes # Enable persistence
+    volumes:
+      - redis_data:/data # Persist Redis data
+    networks:
+      - chatbot-network
+
+networks:
+  chatbot-network:
+    driver: bridge
+
+volumes:
+  redis_data: # Define named volume for Redis data persistence
