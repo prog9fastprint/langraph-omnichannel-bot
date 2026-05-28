@@ -109,8 +109,12 @@ class ERPClient:
     async def get_product_by_id(self, product_id: str) -> dict:
         """Fetches product details from the list endpoint and filters by product_id."""
         products = await self.get("inventory/api/ai/products/")
+        if not isinstance(products, list):
+             logger.error(f"Expected list of products, got {type(products)}: {products}")
+             raise ValueError("Unexpected API response format.")
+
         for product in products:
-            if str(product.get("id")) == str(product_id):
+            if isinstance(product, dict) and str(product.get("id")) == str(product_id):
                 return product
         raise ValueError(f"Product {product_id} not found.")
 

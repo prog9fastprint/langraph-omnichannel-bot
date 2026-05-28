@@ -1,111 +1,174 @@
 # Omnichannel AI Chatbot
 
-This project implements a scalable, production-grade AI-powered chatbot microservice designed to operate across multiple messaging platforms, specifically WhatsApp and Telegram. Built with FastAPI and leveraging LangGraph for sophisticated AI orchestration, it integrates seamlessly with an existing Django ERP system for real-time data access and Google Gemini for conversational AI capabilities.
+A fast, scalable, and intelligent omnichannel microservice designed to act as an AI chatbot for WhatsApp and Telegram. Powered by **FastAPI**, **LangGraph**, and **Google Gemini**, this bot seamlessly fetches live data from a Django ERP system, maintaining a strict policy of "No Local Business DB" to ensure a single source of truth.
 
-## Project Goal
+## Key Features
 
-The primary objective is to deliver a robust and flexible AI chatbot that:
-- Supports both WhatsApp (via Meta Cloud API) and Telegram (via Bot API).
-- Utilizes a unified AI Router powered by LangGraph to ensure consistent business logic across all platforms.
-- Integrates Google Gemini (1.5 Flash/Pro) for conversational AI, including vision and audio processing.
-- Operates without a local database for business logic, fetching all real-time data (stock, orders, complaints) and long-term memory through API calls to an existing Django ERP.
-- Employs Redis for LangGraph checkpoint state persistence and rate-limiting functionalities.
-- Is containerized using Docker, allowing for straightforward deployment to a Ubuntu VPS.
+*   **Omnichannel Support**: Handles both WhatsApp and Telegram webhooks natively.
+*   **Platform-Agnostic Logic**: Core LangGraph AI agent logic is decoupled from platform-specific payload formats.
+*   **Multimodal AI**: Leverages Google Gemini for processing text, images, and audio.
+*   **Stateful Conversations**: Uses LangGraph Checkpointers (Redis/Postgres) to maintain chat context across sessions.
+*   **Django ERP Integration**: Directly queries the central Django ERP API for live product, stock, and pricing data.
+*   **Async First**: Built entirely on `async/await` for high concurrency and performance.
 
-## Key Technologies
+---
 
-- **FastAPI**: High-performance Python web framework for building the microservice and handling webhooks.
-- **LangGraph**: Declarative framework for building stateful, multi-actor applications with LLMs, used for AI orchestration.
-- **LangChain**: Provides the necessary model bindings and tool integrations for the LLMs.
-- **Google Gemini (2.5 Flash/Pro)**: The core AI model providing chat, vision, audio processing, and function calling capabilities.
-- **Pydantic**: Used for robust data validation of incoming webhooks and API responses.
-- **httpx**: Asynchronous HTTP client for efficient communication with external APIs (Meta, Telegram, ERP).
-- **Redis**: Employed for conversational state persistence (LangGraph checkpoints) and rate limiting.
-- **Django ERP**: The external source of truth for all business logic and data, accessed via HTTP APIs.
+## Tech Stack
 
-## Non-Negotiable Architecture Rules
+*   **Framework**: [FastAPI](https://fastapi.tiangolo.com/) & Uvicorn
+*   **AI & Orchestration**: [LangChain](https://python.langchain.com/) & [LangGraph](https://langchain-ai.github.io/langgraph/)
+*   **LLM Provider**: Google Gemini (`langchain-google-genai`) & OpenRouter
+*   **State Persistence**: Redis & PostgreSQL (`langgraph-checkpoint-redis`, `langgraph-checkpoint-postgres`)
+*   **HTTP Client**: `httpx` for asynchronous ERP requests
 
-- **Omnichannel Abstraction**: The AI logic must not care whether the message came from Telegram or WhatsApp.
-- **Unified AI Router**: All business logic is centralized in LangGraph to ensure platform-agnostic behavior.
-- **No Local Database**: The chatbot is a stateless microservice for business logic. All stock, order, and customer data MUST be fetched from the Django ERP via HTTP APIs.
-- **Async/Await Pattern**: Use `async def`, `await`, and `httpx.AsyncClient` for all non-blocking I/O operations.
-- **Strict Validation**: Pydantic models must be used for all incoming payloads and external API responses to ensure data integrity.
+---
 
-## Development Roadmap (Phases)
+## Architecture & Flow
 
-- **Phase 1: Foundation (FastAPI & Dual Webhooks)**: Initial project setup, server initialization, HMAC/Secret Token verification for Meta/Telegram, and payload normalization.
-- **Phase 2: AI Core (LangGraph & Gemini Integration)**: Configuring LLM wrappers, building the state graph workflow, and integrating Redis for persistent conversation memory.
-- **Phase 3: ERP Integration**: Building secure ERP API clients and wiring LangChain tools for real-time stock and order status checks.
-- **Phase 4: Advanced Features**: Implementing multimodal media downloading (images/voice) and RAG querying via the ERP knowledge base.
-- **Phase 5: Infrastructure**: Final Dockerization and container orchestration for production deployment.
+### High-Level Architecture
+```mermaid
+graph TD
+    User([User]) -->|WhatsApp / Telegram| Webhooks(FastAPI Webhooks)
+    Webhooks --> Normalizer[Payload Normalizer]
+    Normalizer -->|Normalized Message| TaskQ[Background Tasks]
+    
+    subgraph Core AI Microservice
+        TaskQ --> Agent[LangGraph AI Agent]
+        Agent <--> StateDB[(Redis / Postgres State)]
+        Agent <--> LLM[Gemini 2.5 API]
+    end
+    
+    Agent <-->|REST API| ERP[(Django ERP API)]
+```
 
-## Features Implemented
+### Webhook Execution Flow
+```mermaid
+sequenceDiagram
+    participant Platform as WhatsApp/Telegram
+    participant FastAPI
+    participant LangGraph
+    participant ERP as Django ERP
+    
+    Platform->>FastAPI: HTTP POST /webhook/*
+    FastAPI->>FastAPI: Verify Signature / Token
+    FastAPI->>FastAPI: Normalize Payload (Text/Media)
+    FastAPI-->>Platform: 200 OK (Acknowledge)
+    
+    Note right of FastAPI: Async Background Task
+    FastAPI->>LangGraph: Invoke Agent with Message
+    LangGraph->>ERP: Query Data (if needed)
+    ERP-->>LangGraph: Live Data Response
+    LangGraph->>Platform: Send AI Reply
+```
 
-- **Dual-Platform Webhooks**: Securely handles incoming messages and events from both WhatsApp and Telegram.
-- **Omnichannel Abstraction**: AI logic is platform-agnostic, processing messages via a normalized format.
-- **AI Orchestration**: LangGraph manages conversational flow, tool usage, and state transitions.
-- **Conversational Memory**: Redis checkpointer ensures persistent conversation history.
-- **ERP Integration**: Tools to query ERP for real-time stock levels and order statuses.
-- **Media Processing**: Ability to download and pass voice notes and images to Gemini for multimodal understanding.
-- **RAG Capabilities**: Tool for retrieving knowledge from the ERP's `pgvector` knowledge base.
-- **Dockerization**: Containerized application setup for simplified deployment and environment management.
+---
 
-## Getting Started
+## Setup & Installation
 
-To run this project, you will need Docker and Docker Compose installed.
+You can run this project using either **Docker** (recommended) or **locally via Python venv**.
+
+### Prerequisites
+- Python 3.10+
+- Redis Server
+- PostgreSQL (if using postgres checkpointer)
+- Environment variables configured (see `.env` section)
+
+### Option 1: Docker (Recommended)
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository_url>
+   git clone <repo-url>
    cd python-omnichannel-ai
    ```
 
-2. **Configure Environment Variables:**
-   Create a `.env` file in the project root based on the provided `.env` template. Populate it with your API keys and configuration details for WhatsApp, Telegram, Gemini, ERP, and Redis.
+2. **Setup Environment Variables:**
+   ```bash
+   cp .env.example .env
+   # Fill in the necessary secrets in .env
+   ```
 
-3. **Build and Run with Docker Compose:**
+3. **Build and Run:**
    ```bash
    docker-compose up --build -d
    ```
 
-   This command will build the FastAPI application image, start the Redis service, and then start the FastAPI application.
+### Option 2: Local Setup (venv + Uvicorn)
 
-4. **Access the Application:**
-   The FastAPI application will be accessible at `http://localhost:8000`.
-   - Health check: `http://localhost:8000/health`
-   - WhatsApp Webhook: `http://localhost:8000/webhook/whatsapp`
-   - Telegram Webhook: `http://localhost:8000/webhook/telegram`
+1. **Clone the repository:**
+   ```bash
+   git clone <repo-url>
+   cd python-omnichannel-ai
+   ```
 
-   You will need to configure your WhatsApp and Telegram webhook settings to point to your deployed application's URL (e.g., via Ngrok if running locally).
+2. **Create and activate a virtual environment:**
+   ```bash
+   python -m venv venv
+   # On Windows:
+   venv\Scripts\activate
+   # On Linux/macOS:
+   source venv/bin/activate
+   ```
 
-## Project Structure
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-```
-.
-├── .env                  # Environment variables (ignored by Git)
-├── .gitignore            # Specifies intentionally untracked files to ignore
-├── Dockerfile            # Docker build instructions for the FastAPI app
-├── docker-compose.yml    # Defines multi-container Docker application (FastAPI + Redis)
-├── requirements.txt      # Python dependencies
-├── docs-python/          # Project documentation and build plan
-│   └── ...
-└── src/                  # Main application source code
-    ├── __init__.py
-    ├── config.py         # Loads environment variables via Pydantic
-    ├── main.py           # FastAPI app instance, webhook endpoints, and global exception handler
-    ├── normalizer.py     # Transforms platform-specific payloads into a normalized format
-    ├── schemas.py        # Pydantic models for webhook payloads and normalized messages
-    ├── security.py       # Webhook verification logic (HMAC for WhatsApp, Secret Token for Telegram)
-    ├── agent/            # LangGraph agent implementation
-    │   ├── __init__.py
-    │   ├── graph.py      # LangGraph workflow definition and Redis checkpointer integration
-    │   ├── llm.py        # Google Gemini LLM configuration
-    │   └── models.py     # AgentState definition for LangGraph
-    │   └── tools.py      # LangChain tools for ERP interaction (stock, orders, RAG)
-    └── services/         # External service clients
-        ├── __init__.py
-        ├── erp_client.py       # Client for secure communication with Django ERP API
-        ├── media_downloader.py # Downloads media from WhatsApp and Telegram
-        ├── telegram_client.py  # Client for sending messages to Telegram
-        └── whatsapp_client.py  # Client for sending messages to WhatsApp
-```
+4. **Setup Environment Variables:**
+   ```bash
+   cp .env.example .env
+   # Fill in the necessary secrets in .env
+   ```
+
+5. **Run the FastAPI server:**
+   ```bash
+   uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+---
+
+## ⚙️ Environment Variables (`.env`)
+
+Here are the key environment variables required to run the service:
+
+### WhatsApp Cloud API
+*   `WHATSAPP_PHONE_NUMBER_ID`
+*   `WHATSAPP_ACCESS_TOKEN`
+*   `WHATSAPP_APP_SECRET`
+*   `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
+*   `WHATSAPP_API_VERSION`
+
+### Telegram Bot API
+*   `TELEGRAM_BOT_TOKEN`
+*   `TELEGRAM_SECRET_TOKEN`
+*   `NGROK_URL` (Required for local webhook registration)
+
+### AI Providers
+*   `GEMINI_API_KEY`
+*   `OPENROUTER_API_KEY`
+
+### Django ERP Integration
+*   `ERP_BASE_URL` (e.g., https://erp.yourdomain.com)
+*   `ERP_API_TOKEN`
+*   `ERP_USERNAME`
+*   `ERP_PASSWORD`
+*   `ERP_DB_URL`
+
+### State Persistence
+*   `REDIS_HOST` (default: localhost)
+*   `REDIS_PORT` (default: 6379)
+
+---
+
+## 🛣️ API Routes
+
+### General
+*   `GET /health`: Health check endpoint.
+
+### Webhooks
+*   `GET /webhook/whatsapp`: WhatsApp webhook verification.
+*   `POST /webhook/whatsapp`: Receives incoming WhatsApp messages.
+*   `POST /webhook/telegram`: Receives incoming Telegram messages.
+
+### Admin
+*   `POST /admin/register-telegram-webhook`: Dynamically registers the Telegram webhook using your `NGROK_URL`.

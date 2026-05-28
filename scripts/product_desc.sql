@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS ai_product_shopify  (
     variant_price DECIMAL(10,2)
 );
 
-\COPY products(handle, title, body, vendor, tags, variant_sku, variant_price)
+\COPY ai_product_shopify(handle, title, body, vendor, tags, variant_sku, variant_price)
 FROM 'F:\prog9\python-omnichannel-ai\scripts\products_for_postgres_final.csv'
 WITH (FORMAT csv, HEADER true, QUOTE '"', ENCODING 'UTF8');
+

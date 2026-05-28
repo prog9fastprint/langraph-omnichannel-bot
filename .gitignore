@@ -9,6 +9,10 @@ __pycache__/
 venv/
 .venv/
 
+# Test Script
+test_script/
+scripts/
+
 # Editor directories and files
 .vscode/*
 !.vscode/settings.json # Keep specific VS Code settings if needed

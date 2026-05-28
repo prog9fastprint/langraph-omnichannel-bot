@@ -8,7 +8,9 @@ from src.schemas import WhatsAppPayload, TelegramUpdate, NormalizedMessage
 from src.normalizer import normalize_payload
 import httpx
 from langchain_core.messages import HumanMessage
-from src.agent.graph import app_graph, checkpointer
+from src.agent.graph import init_graph
+app_graph = None
+checkpointer = None
 from src.agent.models import AgentState
 from src.services.media_downloader import media_downloader
 
@@ -181,11 +183,14 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 async def startup_event():
+    global checkpointer, app_graph
     logger.info("Application startup event triggered.")
     logger.info(f"Loaded ERP Base URL: {settings.ERP_BASE_URL}")
+    checkpointer, app_graph = await init_graph()
     await checkpointer.setup()
     logger.info("Postgres checkpointer tables initialized.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Application shutdown event triggered.")
+    await checkpointer.aclose()

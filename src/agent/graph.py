@@ -1,4 +1,4 @@
-from typing import Callable, Union
+from typing import Callable, Union, Literal
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.runnables import Runnable
@@ -7,76 +7,131 @@ from src.agent.llm import llm
 from src.services.whatsapp_client import whatsapp_client
 from src.services.telegram_client import telegram_client
 import logging
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg_pool import AsyncConnectionPool
 from src.config import settings
-from src.agent.tools import search_products, check_order_status, get_product_price, get_product_stock
 from langgraph.prebuilt import ToolNode
+from src.agent.skills import SalesSkill, SupportSkill
+from enum import Enum
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# Define the tools available to the agent
-tools = [search_products, check_order_status, get_product_price, get_product_stock]
+# Initialize Skills
+sales_skill = SalesSkill()
+support_skill = SupportSkill()
+
+# Define the tools available to the agent (aggregated from skills)
+tools = sales_skill.tools + support_skill.tools
 
 # Bind tools to the LLM
-# This allows the LLM to know about the tools and call them.
 llm_with_tools = llm.bind_tools(tools)
 
-def _agent_node(state: AgentState) -> dict:
+# --- Pydantic models for structured routing ---
+
+class RouteDestination(str, Enum):
+    SALES = "sales"
+    SUPPORT = "support"
+    GREETING = "greeting"
+    REFUSE = "refuse"
+
+class SupervisorRouting(BaseModel):
+    destination: RouteDestination = Field(description="The next node to route the conversation to.")
+    reasoning: str = Field(description="Brief explanation for the routing decision.")
+
+# --- Graph Nodes ---
+
+def supervisor_node(state: AgentState) -> dict:
     """
-    Agent node: Determines the next action based on the conversation history.
-    It either generates a response directly or calls a tool.
+    Supervisor node: Routes the request to the appropriate skill.
+    Returns internal routing message (not user-facing).
     """
     system_prompt = SystemMessage(
-        content="""You are a warm and helpful FastPrint Omnichannel AI Assistant.
-FastPrint specializes in printing raw materials and accessories.
+        content="""You are the FastPrint Omnichannel AI Supervisor.
+Your role is to route customer requests to the correct expert skill:
+- sales: product search, stock checks, pricing.
+- support: order status tracking.
+- greeting: polite greetings (detect language and respond in same).
 
-You have access to the following tools:
-- check_stock       → Check current stock availability for a product
-- get_price         → Get the latest pricing for a product
-- get_order_status  → Track and retrieve the status of a customer's order [COMING SOON]
-- get_product_description → Get detailed description and specs of a product [COMING SOON]
-
-## Greeting Behavior
-When a customer first messages you (or asks what you can do), ALWAYS:
-1. Greet them warmly by name if available, otherwise use a friendly general greeting.
-2. Briefly introduce yourself as the FastPrint AI Assistant.
-3. Proactively list ALL four capabilities so the customer knows what to expect.
-
-Example opening:
-"Hi there! 👋 I'm the FastPrint AI Assistant, here to make your experience as smooth as possible.
-Here's what I can help you with today:
-  ✅ Check stock availability
-  ✅ Get product pricing
-  🔜 Track your order status (coming soon)
-  🔜 Product descriptions & specs (coming soon)
-Just let me know what you need — I'm happy to help!"
-
-## Handling Tool Availability
-- check_stock and get_price are fully operational — use them confidently.
-- get_order_status and get_product_description are NOT yet available.
-  → If a customer asks for either, respond warmly, acknowledge the request,
-    and let them know that feature is coming soon. Offer to help with what IS available.
-
-## General Behavior
-- Always be warm, clear, and patient.
-- If a customer's request is unclear, ask one focused clarifying question.
-- Never make up stock levels, prices, order statuses, or product details — always use the tools.
-- Keep responses concise but friendly. Avoid robotic or overly formal language.
+STRICT CONSTRAINTS:
+1. ONLY respond to Sales, Support, or Greeting requests.
+2. DO NOT perform coding, general knowledge, or creative writing tasks.
+3. If a request is out-of-scope, set destination to 'refuse'.
 """
     )
+    # Pass full conversation history, but filter out internal routing tags
+    filtered_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and str(m.content).startswith("__ROUTE__:"))]
+    messages = [system_prompt] + filtered_messages
 
-    messages = [system_prompt] + state["messages"]
+    structured_llm = llm_with_tools.with_structured_output(SupervisorRouting)
+    routing = structured_llm.invoke(messages)
 
-    response = llm_with_tools.invoke(messages)
+    logger.info(f"Supervisor routed to: {routing.destination} — {routing.reasoning}")
+
+    # Store routing as internal metadata, not user-facing
+    return {"messages": [AIMessage(content=f"__ROUTE__:{routing.destination.value}")]}
+
+
+async def sales_agent_node(state: AgentState) -> dict:
+    """Sales agent: calls LLM with tools to handle sales queries."""
+    system_prompt = SystemMessage(
+        content="""You are a Sales expert for FastPrint, specializing in printing raw materials and accessories.
+You have access to tools: search_products, get_product_price, get_product_stock.
+Use these tools to help the customer. Be warm, concise, and helpful.
+Always respond in the same language the customer used."""
+    )
+    # Filter out internal routing messages
+    user_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and m.content.startswith("__ROUTE__:"))]
+    messages = [system_prompt] + user_messages
+
+    response = await llm_with_tools.ainvoke(messages)
     return {"messages": [response]}
 
-# Instantiate ToolNode with the defined tools
+
+async def support_agent_node(state: AgentState) -> dict:
+    """Support agent: calls LLM with tools to handle support queries."""
+    system_prompt = SystemMessage(
+        content="""You are a Support expert for FastPrint.
+You have access to tools: check_order_status.
+Help customers track their orders. Be warm and concise.
+Always respond in the same language the customer used."""
+    )
+    user_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and m.content.startswith("__ROUTE__:"))]
+    messages = [system_prompt] + user_messages
+
+    response = await llm_with_tools.ainvoke(messages)
+    return {"messages": [response]}
+
+
+async def greeting_node(state: AgentState) -> dict:
+    """Greeting node: LLM generates polite greeting in detected language."""
+    system_prompt = SystemMessage(
+        content="""You are a warm and helpful FastPrint AI Assistant.
+Respond to the user's greeting in the same language they used.
+Briefly introduce yourself and list what you can help with:
+  ✅ Search products
+  ✅ Check stock availability
+  ✅ Get product pricing
+  🔜 Track order status (coming soon)
+Keep it friendly and concise."""
+    )
+    filtered_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and str(m.content).startswith("__ROUTE__:"))]
+    messages = [system_prompt] + filtered_messages
+    response = await llm.ainvoke(messages)
+    return {"messages": [AIMessage(content=response.content)]}
+
+
+async def refusal_node(state: AgentState) -> dict:
+    """Refusal node: politely declines out-of-scope requests."""
+    return {"messages": [AIMessage(content="Mohon maaf, saya hanya dapat membantu untuk pencarian produk, pengecekan stok, harga, dan status pesanan. Ada yang bisa saya bantu terkait hal tersebut?")]}
+
+
+# Instantiate ToolNode
 tool_node = ToolNode(tools)
 
+
 async def _send_response_node(state: AgentState) -> dict:
-    """
-    Send response node: Sends the final AI message back to the user via the appropriate platform.
-    """
+    """Send the final AI response to user via appropriate platform."""
     import json
 
     def _extract_text(content) -> str:
@@ -98,71 +153,135 @@ async def _send_response_node(state: AgentState) -> dict:
             return " ".join(texts)
         return str(content)
 
-    last_message = state["messages"][-1]
+    # Find the last non-routing AI message (skip both new __ROUTE__: and old "Routing to:" formats)
+    last_message = None
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, AIMessage):
+            if msg.content.startswith("__ROUTE__:") or msg.content.startswith("Routing to:"):
+                continue
+            last_message = msg
+            break
+        if isinstance(msg, ToolMessage):
+            last_message = msg
+            break
+
+    if last_message is None:
+        return {}
+
     user_id = state["user_id"]
     platform = state["platform"]
 
-    # Extract the content from the last message.
     response_content = ""
     if isinstance(last_message, AIMessage):
         response_content = _extract_text(last_message.content)
     elif isinstance(last_message, ToolMessage):
         response_content = f"I've processed your request. {_extract_text(last_message.content)}"
-    elif isinstance(last_message, HumanMessage): # Should not happen, but for safety
-        response_content = f"I received: {_extract_text(last_message.content)}"
 
     if not response_content:
-        logger.warning(f"No content to send for user {user_id} on {platform}. State: {state}")
         return {}
 
     if platform == "whatsapp":
         await whatsapp_client.send_text_message(to=user_id, text=response_content)
-        logger.info(f"Sent WhatsApp response to {user_id}: {response_content}")
     elif platform == "telegram":
         await telegram_client.send_text_message(chat_id=user_id, text=response_content)
-        logger.info(f"Sent Telegram response to {user_id}: {response_content}")
-    else:
-        logger.error(f"Unknown platform '{platform}' for user {user_id}. Cannot send message.")
-    
-    return {"messages": []} # Clear messages after sending
 
-def _should_continue(state: AgentState) -> str:
-    """
-    Conditional edge: Determines whether to continue to a tool call or end the graph.
-    """
+    return {"messages": []}
+
+
+# --- Conditional edges ---
+
+def _route_supervisor(state: AgentState) -> Literal["sales", "support", "greeting", "refusal"]:
+    """Route based on supervisor's internal routing tag."""
+    last_msg = state["messages"][-1]
+    content = last_msg.content if isinstance(last_msg, AIMessage) else ""
+    if "__ROUTE__:sales" in content:
+        return "sales"
+    if "__ROUTE__:support" in content:
+        return "support"
+    if "__ROUTE__:greeting" in content:
+        return "greeting"
+    return "refusal"
+
+
+def _should_continue_after_agent(state: AgentState) -> Literal["tools", "send_response"]:
+    """After sales/support agent: if LLM requested tool calls, go to tools. Otherwise send response."""
     last_message = state["messages"][-1]
-    if last_message.tool_calls:
-        return "continue"
-    return "end"
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    return "send_response"
 
-# Build the graph
+
+def _should_continue_after_tools(state: AgentState) -> Literal["sales_agent", "support_agent"]:
+    """After tools execute, route back to the agent that invoked them.
+    We check for the routing tag to determine which agent to return to."""
+    for msg in state["messages"]:
+        if isinstance(msg, AIMessage) and msg.content.startswith("__ROUTE__:"):
+            if "support" in msg.content:
+                return "support_agent"
+    return "sales_agent"
+
+
+# --- Build the graph ---
 workflow = StateGraph(AgentState)
 
-workflow.add_node("agent", _agent_node)
-workflow.add_node("tools", tool_node) # Use the instantiated ToolNode
+workflow.add_node("supervisor", supervisor_node)
+workflow.add_node("sales_agent", sales_agent_node)
+workflow.add_node("support_agent", support_agent_node)
+workflow.add_node("greeting", greeting_node)
+workflow.add_node("refusal", refusal_node)
+workflow.add_node("tools", tool_node)
 workflow.add_node("send_response", _send_response_node)
 
-workflow.set_entry_point("agent")
+workflow.set_entry_point("supervisor")
 
-# Add conditional edges
+# Supervisor → skill routing
 workflow.add_conditional_edges(
-    "agent",
-    _should_continue,
+    "supervisor",
+    _route_supervisor,
     {
-        "continue": "tools",
-        "end": "send_response"
+        "sales": "sales_agent",
+        "support": "support_agent",
+        "greeting": "greeting",
+        "refusal": "refusal"
     }
 )
 
-# After tool execution, always go back to the agent to re-evaluate
-workflow.add_edge("tools", "agent")
+# Sales/Support agent → tools or send_response
+workflow.add_conditional_edges(
+    "sales_agent",
+    _should_continue_after_agent,
+    {"tools": "tools", "send_response": "send_response"}
+)
+workflow.add_conditional_edges(
+    "support_agent",
+    _should_continue_after_agent,
+    {"tools": "tools", "send_response": "send_response"}
+)
 
-# After sending the response, end the graph
+# Tools → back to the calling agent
+workflow.add_conditional_edges(
+    "tools",
+    _should_continue_after_tools,
+    {"sales_agent": "sales_agent", "support_agent": "support_agent"}
+)
+
+# Terminal nodes → send_response → END
+workflow.add_edge("greeting", "send_response")
+workflow.add_edge("refusal", "send_response")
 workflow.add_edge("send_response", END)
 
 # Configure PostgresSaver for persistence
-# NOTE: Call await checkpointer.setup() at application startup
-checkpointer = PostgresSaver.from_conn_string(settings.ERP_DB_URL)
+pool = None
 
-# Compile the graph with message history
-app_graph: Runnable = workflow.compile(checkpointer=checkpointer)
+async def init_graph():
+    global pool
+    if pool is None:
+        pool = AsyncConnectionPool(
+            conninfo=settings.ERP_DB_URL,
+            max_size=20,
+            open=True,
+            kwargs={"autocommit": True}
+        )
+    checkpointer = AsyncPostgresSaver(conn=pool)
+    app_graph: Runnable = workflow.compile(checkpointer=checkpointer)
+    return checkpointer, app_graph
