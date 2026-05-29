@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -11,17 +12,44 @@ from langchain_core.messages import HumanMessage
 from src.agent.graph import init_graph
 app_graph = None
 checkpointer = None
+import os
+import psycopg
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from src.agent.models import AgentState
 from src.services.media_downloader import media_downloader
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"), # Saves logs to 'app.log'
+        logging.StreamHandler()         # Still prints to console
+    ]
+)
 logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    global checkpointer, app_graph
+    logger.info("Application startup event triggered.")
+    logger.info(f"Loaded ERP Base URL: {settings.ERP_BASE_URL}")
+    checkpointer, app_graph = await init_graph()
+    await checkpointer.setup()
+    logger.info("Postgres checkpointer tables initialized.")
+    
+    yield # Application runs here
+    
+    # Shutdown logic
+    logger.info("Application shutdown event triggered.")
+    await checkpointer.aclose()
 
 app = FastAPI(
     title="Omnichannel AI Chatbot",
     description="FastAPI microservice for WhatsApp and Telegram AI chatbot.",
     version="0.1.0",
+    lifespan=lifespan
 )
 
 @app.get("/health", summary="Health check endpoint")
@@ -30,6 +58,71 @@ async def health_check():
     Responds with a simple status to indicate the service is running.
     """
     return {"status": "ok"}
+
+@app.get("/api/product/search", summary="Semantic Product Search using Vector Embeddings")
+async def semantic_product_search(query: str):
+    """
+    Search products semantically using OpenAI Embeddings and pgvector in PostgreSQL.
+    """
+    if not query:
+        raise HTTPException(status_code=400, detail="Query parameter is required")
+        
+    vector_db_url = settings.VECTOR_DB_URL or settings.ERP_DB_URL
+    if not vector_db_url:
+        raise HTTPException(status_code=500, detail="Vector database connection URL is not configured")
+
+    api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
+    if not api_key:
+         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured")
+
+    try:
+        embeddings_client = GoogleGenerativeAIEmbeddings(   
+            model="models/gemini-embedding-2",  # 1. The NEW official model name
+            google_api_key=api_key,
+            output_dimensionality=1536
+        )
+        fallback_client = GoogleGenerativeAIEmbeddings(
+            model="models/gemini-embedding-001",  # 2. Fallback with 'gemini-' prefix
+            google_api_key=api_key,
+            output_dimensionality=1536
+        )
+        
+        try:
+            query_vector = await embeddings_client.aembed_query(query)
+        except Exception as e_primary:
+            logger.warning(f"Primary embedding model failed: {e_primary}. Trying fallback.")
+            query_vector = await fallback_client.aembed_query(query)
+        
+        results = []
+        async with await psycopg.AsyncConnection.connect(vector_db_url) as conn:
+            async with conn.cursor() as cur:
+                # pgvector <=> is cosine distance
+                await cur.execute(
+                    """
+                    SELECT handle, title, body, vendor, tags, variant_sku, variant_price
+                    FROM ai_product_shopify
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT 5
+                    """,
+                    (query_vector,)
+                )
+                rows = await cur.fetchall()
+                for row in rows:
+                    results.append({
+                        "handle": row[0],
+                        "title": row[1],
+                        "body": row[2],
+                        "vendor": row[3],
+                        "tags": row[4],
+                        "variant_sku": row[5],
+                        "variant_price": float(row[6]) if row[6] is not None else None
+                    })
+                    
+        return {"status": "success", "data": results}
+
+    except Exception as e:
+        logger.error(f"Error in semantic search: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/webhook/whatsapp", summary="WhatsApp Webhook Verification")
 async def whatsapp_webhook_verification(
@@ -180,17 +273,3 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": "An internal error occurred and was handled silently."
         }
     )
-
-@app.on_event("startup")
-async def startup_event():
-    global checkpointer, app_graph
-    logger.info("Application startup event triggered.")
-    logger.info(f"Loaded ERP Base URL: {settings.ERP_BASE_URL}")
-    checkpointer, app_graph = await init_graph()
-    await checkpointer.setup()
-    logger.info("Postgres checkpointer tables initialized.")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Application shutdown event triggered.")
-    await checkpointer.aclose()

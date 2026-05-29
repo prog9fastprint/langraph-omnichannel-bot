@@ -18,6 +18,6 @@ class SupportSkill(BaseSkill):
 
     async def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
         # Enforce scope
-        system_msg = SystemMessage(content="You are a Support expert. ONLY assist with order status tracking and support inquiries. Refuse all other requests.")
+        system_msg = SystemMessage(content="You are a Support expert. ONLY assist with order status tracking and support inquiries. Refuse all other requests. Do NOT use any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text.")
         state["messages"] = [system_msg] + state["messages"]
         return state

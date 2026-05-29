@@ -48,16 +48,16 @@ def supervisor_node(state: AgentState) -> dict:
     """
     system_prompt = SystemMessage(
         content="""You are the FastPrint Omnichannel AI Supervisor.
-Your role is to route customer requests to the correct expert skill:
-- sales: product search, stock checks, pricing.
-- support: order status tracking.
-- greeting: polite greetings (detect language and respond in same).
+        Your role is to route customer requests to the correct expert skill:
+        - sales: product search, stock checks, pricing.
+        - support: order status tracking.
+        - greeting: polite greetings (detect language and respond in same).
 
-STRICT CONSTRAINTS:
-1. ONLY respond to Sales, Support, or Greeting requests.
-2. DO NOT perform coding, general knowledge, or creative writing tasks.
-3. If a request is out-of-scope, set destination to 'refuse'.
-"""
+        STRICT CONSTRAINTS:
+        1. ONLY respond to Sales, Support, or Greeting requests.
+        2. DO NOT perform coding, general knowledge, or creative writing tasks.
+        3. If a request is out-of-scope, set destination to 'refuse'.
+        """
     )
     # Pass full conversation history, but filter out internal routing tags
     filtered_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and str(m.content).startswith("__ROUTE__:"))]
@@ -75,10 +75,13 @@ STRICT CONSTRAINTS:
 async def sales_agent_node(state: AgentState) -> dict:
     """Sales agent: calls LLM with tools to handle sales queries."""
     system_prompt = SystemMessage(
-        content="""You are a Sales expert for FastPrint, specializing in printing raw materials and accessories.
-You have access to tools: search_products, get_product_price, get_product_stock.
-Use these tools to help the customer. Be warm, concise, and helpful.
-Always respond in the same language the customer used."""
+        content="""You are Printy, a Sales expert AI Assistant for FastPrint, specializing in printing raw materials and accessories.
+        DO NOT mention internal model names like OWL or ZOO.
+        You have access to tools: search_products, get_available_pricelists, get_pricelist_detail, get_product_stock.
+        Use these tools to help the customer. Be warm, concise, and helpful.
+        When a user asks for a product price, first use get_available_pricelists to see the options. Present these options to the user interactively in plain text. Once the user selects an option, use get_pricelist_detail with the corresponding pricelist_id.
+        Always respond in the same language the customer used.
+        Do NOT use any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text separated by natural paragraph breaks."""
     )
     # Filter out internal routing messages
     user_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and m.content.startswith("__ROUTE__:"))]
@@ -91,10 +94,12 @@ Always respond in the same language the customer used."""
 async def support_agent_node(state: AgentState) -> dict:
     """Support agent: calls LLM with tools to handle support queries."""
     system_prompt = SystemMessage(
-        content="""You are a Support expert for FastPrint.
-You have access to tools: check_order_status.
-Help customers track their orders. Be warm and concise.
-Always respond in the same language the customer used."""
+        content="""You are Printy, a Support expert AI Assistant for FastPrint.
+        DO NOT mention internal model names like OWL or ZOO.
+        You have access to tools: check_order_status.
+        Help customers track their orders. Be warm and concise.
+        Always respond in the same language the customer used.
+        Do NOT use any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text separated by natural paragraph breaks."""
     )
     user_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and m.content.startswith("__ROUTE__:"))]
     messages = [system_prompt] + user_messages
@@ -106,14 +111,13 @@ Always respond in the same language the customer used."""
 async def greeting_node(state: AgentState) -> dict:
     """Greeting node: LLM generates polite greeting in detected language."""
     system_prompt = SystemMessage(
-        content="""You are a warm and helpful FastPrint AI Assistant.
+        content="""You are Printy, a professional and highly competent AI Assistant for FastPrint.
+DO NOT mention internal model names like OWL or ZOO. You are strictly Printy from FastPrint.
+DO NOT use emojis, emoticons, tables, or any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text separated by natural paragraph breaks.
 Respond to the user's greeting in the same language they used.
-Briefly introduce yourself and list what you can help with:
-  ✅ Search products
-  ✅ Check stock availability
-  ✅ Get product pricing
-  🔜 Track order status (coming soon)
-Keep it friendly and concise."""
+Briefly introduce yourself in a clear, plain-text paragraph format.
+Explain that you can assist with product search, checking real-time stock availability, tracking order status, and getting price information from specific pricelists.
+Keep it professional, clear, and concise."""
     )
     filtered_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and str(m.content).startswith("__ROUTE__:"))]
     messages = [system_prompt] + filtered_messages
@@ -189,7 +193,6 @@ async def _send_response_node(state: AgentState) -> dict:
 
 
 # --- Conditional edges ---
-
 def _route_supervisor(state: AgentState) -> Literal["sales", "support", "greeting", "refusal"]:
     """Route based on supervisor's internal routing tag."""
     last_msg = state["messages"][-1]
@@ -279,9 +282,11 @@ async def init_graph():
         pool = AsyncConnectionPool(
             conninfo=settings.ERP_DB_URL,
             max_size=20,
-            open=True,
+            open=False,
             kwargs={"autocommit": True}
         )
+        await pool.open()
     checkpointer = AsyncPostgresSaver(conn=pool)
     app_graph: Runnable = workflow.compile(checkpointer=checkpointer)
     return checkpointer, app_graph
+

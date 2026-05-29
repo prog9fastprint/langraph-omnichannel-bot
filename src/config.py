@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     ERP_USERNAME: str = ""
     ERP_PASSWORD: str = ""
     ERP_DB_URL: str = ""
+    VECTOR_DB_URL: str = ""
 
     # Redis
     REDIS_HOST: str = "localhost"
