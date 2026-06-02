@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
@@ -17,6 +18,7 @@ import psycopg
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from src.agent.models import AgentState
 from src.services.media_downloader import media_downloader
+from src.services.telegram_client import telegram_client
 
 # Configure logging
 logging.basicConfig(
@@ -93,22 +95,120 @@ async def semantic_product_search(query: str):
             logger.warning(f"Primary embedding model failed: {e_primary}. Trying fallback.")
             query_vector = await fallback_client.aembed_query(query)
         
-        results = []
+        keyword_results = []
+        semantic_results = []
+        logger.info(f"DEBUG SEARCH: Connecting to DB URL: {vector_db_url}")
         async with await psycopg.AsyncConnection.connect(vector_db_url) as conn:
             async with conn.cursor() as cur:
-                # pgvector <=> is cosine distance
+                # 1. Keyword search (ILIKE)
+                raw_tokens = [t for t in query.split() if t.strip()]
+                logger.info(f"DEBUG SEARCH: raw_tokens={raw_tokens}")
+                if raw_tokens:
+                    import re
+                    tokens = []
+                    for token in raw_tokens:
+                        match = re.match(r'^(\d+)([a-zA-Z]+)$', token)
+                        if match:
+                            tokens.extend(match.groups())
+                        else:
+                            tokens.append(token)
+                            
+                    conditions = []
+                    score_parts = []
+                    params = []
+                    score_params = []
+                    
+                    synonyms_map = {
+                        "stamp": ["stamp", "stempel"],
+                        "stempel": ["stamp", "stempel"],
+                        "ink": ["ink", "tinta"],
+                        "tinta": ["ink", "tinta"],
+                        "black": ["black", "hitam"],
+                        "hitam": ["black", "hitam"],
+                        "red": ["red", "merah"],
+                        "merah": ["red", "merah"],
+                        "green": ["green", "hijau"],
+                        "hijau": ["green", "hijau"],
+                        "blue": ["blue", "biru"],
+                        "biru": ["blue", "biru"],
+                    }
+                    
+                    for token in tokens:
+                        token_lower = token.lower()
+                        is_numeric = token.isdigit()
+                        
+                        if token_lower in synonyms_map:
+                            syns = synonyms_map[token_lower]
+                            token_conditions = []
+                            score_conditions = []
+                            for syn in syns:
+                                escaped_syn = syn.replace("%", "\\%").replace("_", "\\_")
+                                token_conditions.append("(title ILIKE %s OR tags ILIKE %s OR body ILIKE %s OR variant_sku ILIKE %s)")
+                                params.extend([f"%{escaped_syn}%", f"%{escaped_syn}%", f"%{escaped_syn}%", f"%{escaped_syn}%"])
+                                    
+                                score_conditions.append("title ILIKE %s")
+                                score_params.append(f"%{escaped_syn}%")
+                                
+                            conditions.append(f"({' OR '.join(token_conditions)})")
+                            score_parts.append(f"(CASE WHEN {' OR '.join(score_conditions)} THEN 1 ELSE 0 END)")
+                        else:
+                            if is_numeric:
+                                conditions.append("(title ~* %s OR tags ~* %s OR variant_sku ILIKE %s)")
+                                pattern = f"\\y{token}\\y"
+                                prefix_pattern = f"{token}%"
+                                params.extend([pattern, pattern, prefix_pattern])
+                                
+                                score_parts.append("(CASE WHEN title ~* %s THEN 1 ELSE 0 END)")
+                                score_params.append(pattern)
+                            else:
+                                escaped_token = token.replace("%", "\\%").replace("_", "\\_")
+                                conditions.append("(title ILIKE %s OR tags ILIKE %s OR body ILIKE %s OR variant_sku ILIKE %s)")
+                                params.extend([f"%{escaped_token}%", f"%{escaped_token}%", f"%{escaped_token}%", f"%{escaped_token}%"])
+                                
+                                score_parts.append("(CASE WHEN title ILIKE %s THEN 1 ELSE 0 END)")
+                                score_params.append(f"%{escaped_token}%")
+                             
+                    sql_query = f"""
+                        SELECT handle, title, body, vendor, tags, variant_sku, variant_price
+                        FROM ai_product_shopify
+                        WHERE {" AND ".join(conditions)}
+                        ORDER BY {" + ".join(score_parts)} DESC, length(title) ASC, length(variant_sku) ASC
+                        LIMIT 100
+                    """
+                    query_params = score_params + params
+                    logger.info(f"DEBUG SEARCH SQL: {sql_query}")
+                    logger.info(f"DEBUG SEARCH PARAMS: {query_params}")
+                    # Log table count
+                    await cur.execute("SELECT COUNT(*) FROM ai_product_shopify")
+                    count_row = await cur.fetchone()
+                    logger.info(f"DEBUG SEARCH: Total rows in ai_product_shopify: {count_row[0]}")
+                    
+                    await cur.execute(sql_query, query_params)
+                    rows = await cur.fetchall()
+                    for row in rows:
+                        keyword_results.append({
+                            "handle": row[0],
+                            "title": row[1],
+                            "body": row[2],
+                            "vendor": row[3],
+                            "tags": row[4],
+                            "variant_sku": row[5],
+                            "variant_price": float(row[6]) if row[6] is not None else None
+                        })
+                
+                # 2. Semantic search (pgvector)
                 await cur.execute(
                     """
                     SELECT handle, title, body, vendor, tags, variant_sku, variant_price
                     FROM ai_product_shopify
                     ORDER BY embedding <=> %s::vector
-                    LIMIT 5
+                    LIMIT 15
                     """,
                     (query_vector,)
                 )
                 rows = await cur.fetchall()
                 for row in rows:
-                    results.append({
+                    semantic_results.append({
                         "handle": row[0],
                         "title": row[1],
                         "body": row[2],
@@ -118,6 +218,39 @@ async def semantic_product_search(query: str):
                         "variant_price": float(row[6]) if row[6] is not None else None
                     })
                     
+        # 3. Combine results, prioritizing keyword search results, deduplicating by variant_sku,
+        # and limiting to at most 3 variants per product handle to ensure product diversity.
+        logger.info(f"DEBUG SEARCH: keyword_results count={len(keyword_results)}")
+        for idx, item in enumerate(keyword_results[:10], 1):
+            logger.info(f"  kw {idx}. title={item['title']} sku={item['variant_sku']} handle={item['handle']}")
+            
+        logger.info(f"DEBUG SEARCH: semantic_results count={len(semantic_results)}")
+        for idx, item in enumerate(semantic_results[:10], 1):
+            logger.info(f"  sem {idx}. title={item['title']} sku={item['variant_sku']} handle={item['handle']}")
+
+        combined_results = []
+        seen_skus = set()
+        handle_counts = {}
+        for item in keyword_results + semantic_results:
+            sku = item["variant_sku"]
+            handle = item["handle"]
+            
+            key = sku if sku else handle
+            if key in seen_skus:
+                continue
+                
+            count = handle_counts.get(handle, 0)
+            if count >= 3:
+                continue
+                
+            seen_skus.add(key)
+            handle_counts[handle] = count + 1
+            combined_results.append(item)
+                
+        results = combined_results[:10]
+        logger.info(f"DEBUG SEARCH: final results count={len(results)}")
+        for idx, item in enumerate(results, 1):
+            logger.info(f"  res {idx}. title={item['title']} sku={item['variant_sku']} handle={item['handle']}")
         return {"status": "success", "data": results}
 
     except Exception as e:
@@ -138,6 +271,14 @@ async def whatsapp_webhook_verification(
         return int(hub_challenge)
     logger.error("WhatsApp webhook verification failed.")
     raise HTTPException(status_code=403, detail="Verification failed")
+
+async def telegram_typing_loop(chat_id: str):
+    try:
+        while True:
+            await telegram_client.send_chat_action(chat_id, action="typing")
+            await asyncio.sleep(4)
+    except asyncio.CancelledError:
+        pass
 
 async def _process_normalized_message(normalized_message: NormalizedMessage):
     """
@@ -169,6 +310,10 @@ async def _process_normalized_message(normalized_message: NormalizedMessage):
     thread_id = f"{normalized_message.platform}:{normalized_message.user_id}"
     input_message = HumanMessage(content=input_content) # HumanMessage can take list of dict for multimodal
 
+    typing_task = None
+    if normalized_message.platform == "telegram":
+        typing_task = asyncio.create_task(telegram_typing_loop(normalized_message.user_id))
+
     try:
         # Invoke the LangGraph agent
         await app_graph.ainvoke(
@@ -182,6 +327,9 @@ async def _process_normalized_message(normalized_message: NormalizedMessage):
         logger.info(f"LangGraph agent invoked for thread_id: {thread_id}")
     except Exception as e:
         logger.error(f"Error invoking LangGraph agent for {thread_id}: {e}", exc_info=True)
+    finally:
+        if typing_task:
+            typing_task.cancel()
 
 @app.post("/webhook/whatsapp", summary="WhatsApp Webhook Endpoint")
 async def whatsapp_webhook(
@@ -273,3 +421,4 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": "An internal error occurred and was handled silently."
         }
     )
+
