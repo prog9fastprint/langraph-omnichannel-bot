@@ -11,7 +11,7 @@ venv/
 
 # Test Script
 test_script/
-scripts/
+# scripts/
 
 # Editor directories and files
 .vscode/*

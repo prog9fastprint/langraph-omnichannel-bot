@@ -19,6 +19,7 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from src.agent.models import AgentState
 from src.services.media_downloader import media_downloader
 from src.services.telegram_client import telegram_client
+from src.services.erp_client import erp_client
 
 # Configure logging
 logging.basicConfig(
@@ -208,15 +209,35 @@ async def semantic_product_search(query: str):
                 )
                 rows = await cur.fetchall()
                 for row in rows:
-                    semantic_results.append({
+                    sku = row[5]
+                    product_data = {
                         "handle": row[0],
                         "title": row[1],
                         "body": row[2],
                         "vendor": row[3],
                         "tags": row[4],
-                        "variant_sku": row[5],
+                        "variant_sku": sku,
                         "variant_price": float(row[6]) if row[6] is not None else None
-                    })
+                    }
+                    
+                    # Enrich with live data from ERP if available
+                    if sku:
+                        try:
+                            live_data = await erp_client.get_product_by_sku(sku)
+                            if live_data:
+                                # Overwrite price and add stock/other live fields
+                                if "price" in live_data or "variant_price" in live_data:
+                                    product_data["variant_price"] = live_data.get("price") or live_data.get("variant_price")
+                                if "stock" in live_data or "qty_available" in live_data:
+                                    product_data["stock"] = live_data.get("stock") or live_data.get("qty_available")
+                                # Add any other live fields without overwriting title/body
+                                for k, v in live_data.items():
+                                    if k not in product_data and k not in ["title", "name", "body", "description"]:
+                                        product_data[k] = v
+                        except Exception as erp_e:
+                            logger.error(f"Failed to fetch live ERP data for SKU {sku} during search: {erp_e}")
+                            
+                    semantic_results.append(product_data)
                     
         # 3. Combine results, prioritizing keyword search results, deduplicating by variant_sku,
         # and limiting to at most 3 variants per product handle to ensure product diversity.
