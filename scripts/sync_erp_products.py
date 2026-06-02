@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(
+        asyncio.WindowsSelectorEventLoopPolicy()
+    )
+
 class GeneratedProductContent(BaseModel):
     description: str = Field(description="A professional, rich e-commerce product description.")
     tags: str = Field(description="Comma separated SEO tags relevant to the product.")
@@ -28,10 +33,15 @@ async def sync_new_products():
     # 1. Fetch all products from ERP
     try:
         logger.info("Fetching products from ERP...")
-        erp_products = await erp_client.get("inventory/api/ai/products/")
-        if not isinstance(erp_products, list):
-            logger.error("Invalid response from ERP: Expected a list.")
+        response = await erp_client.get("inventory/api/ai/products/")
+        
+        if response.get("status") != "success":
+            logger.error(f"ERP returned error: {response}")
             return
+
+        erp_products = response.get("data", [])
+
+        logger.info(f"Received {len(erp_products)} products from ERP")
     except Exception as e:
         logger.error(f"Failed to fetch ERP products: {e}")
         return

@@ -1,5 +1,5 @@
-import logging
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
@@ -11,8 +11,6 @@ from src.normalizer import normalize_payload
 import httpx
 from langchain_core.messages import HumanMessage
 from src.agent.graph import init_graph
-app_graph = None
-checkpointer = None
 import os
 import psycopg
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -20,6 +18,10 @@ from src.agent.models import AgentState
 from src.services.media_downloader import media_downloader
 from src.services.telegram_client import telegram_client
 from src.services.erp_client import erp_client
+
+
+app_graph = None
+checkpointer = None
 
 # Configure logging
 logging.basicConfig(
@@ -379,6 +381,7 @@ async def whatsapp_webhook(
 
 @app.post("/webhook/telegram", summary="Telegram Webhook Endpoint")
 async def telegram_webhook(
+    request: Request,
     background_tasks: BackgroundTasks,
     payload: TelegramUpdate,
     secret_token_verified: Annotated[bool, Depends(verify_telegram_secret)]
@@ -390,6 +393,7 @@ async def telegram_webhook(
         raise HTTPException(status_code=403, detail="Secret token verification failed")
 
     logger.info(f"Received raw Telegram payload: {payload.model_dump_json(indent=2)}")
+    logger.info(f"Telegram Request Headers: {dict(request.headers)}")
     normalized_messages = await normalize_payload(payload)
 
     if normalized_messages:
