@@ -118,6 +118,26 @@ class ERPClient:
                 return product
         raise ValueError(f"Product {product_id} not found.")
 
+    async def get_product_by_sku(self, sku: str) -> dict | None:
+        """Fetches live product details from the ERP using the SKU as a query parameter."""
+        try:
+            response = await self.get("inventory/api/ai/products/", params={"sku": sku})
+            
+            # The API might return a list of matches or a single object.
+            if isinstance(response, list) and len(response) > 0:
+                return response[0]
+            elif isinstance(response, dict) and response.get("sku") == sku:
+                return response
+            elif isinstance(response, dict) and "data" in response:
+                if isinstance(response["data"], list) and len(response["data"]) > 0:
+                    return response["data"][0]
+                    
+            logger.warning(f"Product with SKU {sku} not found or unexpected format in ERP.")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to fetch product by SKU {sku}: {e}")
+            return None
+
     async def get(self, endpoint: str, params: dict = None):
         """Makes an authenticated GET request to the ERP API."""
         return await self._request("GET", endpoint, params=params)
