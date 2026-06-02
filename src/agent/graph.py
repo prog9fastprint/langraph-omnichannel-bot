@@ -63,6 +63,7 @@ def supervisor_node(state: AgentState) -> dict:
         1. ONLY respond to Sales, Support, or Greeting requests.
         2. DO NOT perform coding, general knowledge, or creative writing tasks.
         3. If a request is out-of-scope, set destination to 'refuse'.
+        4. CONTEXT MATTERS: If the user is replying to a follow-up question from the AI (like "ya benar", "iya", "bukan"), route it to the active skill (usually sales or support) instead of refusing.
         """
     )
     # Pass full conversation history, but filter out internal routing tags
