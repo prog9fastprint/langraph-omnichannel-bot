@@ -1,6 +1,6 @@
 # Omnichannel AI Chatbot
 
-A fast, scalable, and intelligent omnichannel microservice designed to act as an AI chatbot for WhatsApp and Telegram. Powered by **FastAPI**, **LangGraph**, and **Google Gemini**, this bot seamlessly fetches live data from a Django ERP system, maintaining a strict policy of "No Local Business DB" to ensure a single source of truth.
+A fast, scalable, and intelligent omnichannel microservice designed to act as an AI chatbot for WhatsApp and Telegram. Powered by **FastAPI**, **LangGraph**, **OpenRouter** (Primary), and **Google Gemini** (Fallback), this bot seamlessly fetches live data from a Django ERP system, maintaining a strict policy of "No Local Business DB" to ensure a single source of truth.
 
 ## Key Features
 
@@ -17,7 +17,7 @@ A fast, scalable, and intelligent omnichannel microservice designed to act as an
 
 *   **Framework**: [FastAPI](https://fastapi.tiangolo.com/) & Uvicorn
 *   **AI & Orchestration**: [LangChain](https://python.langchain.com/) & [LangGraph](https://langchain-ai.github.io/langgraph/)
-*   **LLM Provider**: Google Gemini (`langchain-google-genai`) & OpenRouter
+*   **LLM Provider**: OpenRouter (Primary) & Google Gemini (`langchain-google-genai`) (Fallback)
 *   **State Persistence**: Redis & PostgreSQL (`langgraph-checkpoint-redis`, `langgraph-checkpoint-postgres`)
 *   **HTTP Client**: `httpx` for asynchronous ERP requests
 
@@ -35,7 +35,7 @@ graph TD
     subgraph Core AI Microservice
         TaskQ --> Agent[LangGraph AI Agent]
         Agent <--> StateDB[(Redis / Postgres State)]
-        Agent <--> LLM[Gemini 2.5 API]
+        Agent <--> LLM[OpenRouter / Gemini API]
     end
     
     Agent <-->|REST API| ERP[(Django ERP API)]
@@ -122,8 +122,16 @@ You can run this project using either **Docker** (recommended) or **locally via 
 
 5. **Run the FastAPI server:**
    ```bash
-   uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+   python run.py
    ```
+
+---
+
+## 📜 Utility Scripts
+
+*   `run.py`: Entry point to run the FastAPI application.
+*   `generate-telegram-secret.py`: Generates the Telegram secret token.
+*   `scripts/`: Contains data ingestion, cleaning, and ERP synchronization scripts.
 
 ---
 
