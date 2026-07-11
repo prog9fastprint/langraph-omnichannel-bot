@@ -12,4 +12,4 @@ langgraph-checkpoint-redis>=0.0.2
 langgraph-checkpoint-postgres>=0.0.2
 pydantic-settings>=2.0.0
 beautifulsoup4>=4.12.2
-
+aiomysql>=0.2.0

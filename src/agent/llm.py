@@ -74,7 +74,12 @@ class LLMFallbackWrapper:
         return self
 
     def with_structured_output(self, schema, **kwargs):
-        # Delegate structured output to primary LLM
-        return self.primary_llm.with_structured_output(schema, **kwargs)
+        # Use Gemini for structured output — OpenRouter models often return null choices
+        # when JSON schema / structured output is requested.
+        try:
+            return self.gemini_llm.with_structured_output(schema, **kwargs)
+        except Exception as e:
+            logger.warning(f"Gemini structured output failed, trying primary: {e}")
+            return self.primary_llm.with_structured_output(schema, **kwargs)
 
 llm = LLMFallbackWrapper()

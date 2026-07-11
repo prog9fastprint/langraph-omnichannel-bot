@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from src.config import settings
 from src.security import verify_whatsapp_signature, verify_telegram_secret
 from src.schemas import WhatsAppPayload, TelegramUpdate, NormalizedMessage
@@ -18,7 +18,8 @@ from src.agent.models import AgentState
 from src.services.media_downloader import media_downloader
 from src.services.telegram_client import telegram_client
 from src.services.erp_client import erp_client
-
+import aiomysql
+import urllib.parse
 
 app_graph = None
 checkpointer = None
@@ -278,6 +279,50 @@ async def semantic_product_search(query: str):
 
     except Exception as e:
         logger.error(f"Error in semantic search: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/product/image/{sku}", summary="Get Product Image")
+async def get_product_image(sku: str):
+    """
+    Redirects to the product image URL from tb_pricelist based on SKU.
+    """
+    if not settings.PCLS_DB_URL:
+        raise HTTPException(status_code=500, detail="PCLS_DB_URL is not configured")
+
+    try:
+        parsed_url = urllib.parse.urlparse(settings.PCLS_DB_URL)
+        host = parsed_url.hostname
+        port = parsed_url.port or 3306
+        user = parsed_url.username
+        password = parsed_url.password
+        db = parsed_url.path.lstrip('/')
+
+        conn = await aiomysql.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            db=db,
+            autocommit=True
+        )
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT gambar_produk FROM tb_pricelist WHERE kode_produk = %s LIMIT 1", (sku,))
+            row = await cur.fetchone()
+            if not row or not row[0]:
+                conn.close()
+                raise HTTPException(status_code=404, detail="Image not found for this SKU")
+            
+            gambar_produk = row[0]
+            
+        conn.close()
+        
+        target_url = f"https://pcls.fastprint.co.id/assets/images/product/assets/images/{gambar_produk}"
+        return RedirectResponse(url=target_url)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching product image for sku {sku}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/webhook/whatsapp", summary="WhatsApp Webhook Verification")

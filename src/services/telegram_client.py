@@ -31,6 +31,29 @@ class TelegramClient:
             logger.error(f"Network error sending Telegram message to {chat_id}: {e}")
             raise
 
+    async def send_photo(self, chat_id: Union[int, str], photo: str, caption: str = None):
+        """
+        Sends a photo to a Telegram user or chat.
+        """
+        endpoint = "/sendPhoto"
+        payload = {
+            "chat_id": chat_id,
+            "photo": photo
+        }
+        if caption:
+            payload["caption"] = caption
+        try:
+            response = await self.client.post(endpoint, json=payload)
+            response.raise_for_status()
+            logger.info(f"Telegram photo sent to {chat_id}: {response.json()}")
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Error sending Telegram photo to {chat_id}: {e.response.text}")
+            raise
+        except httpx.RequestError as e:
+            logger.error(f"Network error sending Telegram photo to {chat_id}: {e}")
+            raise
+
     async def send_chat_action(self, chat_id: Union[int, str], action: str = "typing"):
         """
         Sends a chat action (like 'typing') to a Telegram user.

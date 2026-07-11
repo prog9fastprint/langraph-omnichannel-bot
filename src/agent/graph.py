@@ -55,7 +55,7 @@ def supervisor_node(state: AgentState) -> dict:
     system_prompt = SystemMessage(
         content="""You are the FastPrint Omnichannel AI Supervisor.
         Your role is to route customer requests to the correct expert skill:
-        - sales: product search, stock checks, pricing.
+        - sales: product search, stock checks, pricing, product images/photos, and any follow-up about a previously found product.
         - support: order status tracking.
         - greeting: polite greetings (detect language and respond in same).
 
@@ -64,6 +64,8 @@ def supervisor_node(state: AgentState) -> dict:
         2. DO NOT perform coding, general knowledge, or creative writing tasks.
         3. If a request is out-of-scope, set destination to 'refuse'.
         4. CONTEXT MATTERS: If the user is replying to a follow-up question from the AI (like "ya benar", "iya", "bukan"), route it to the active skill (usually sales or support) instead of refusing.
+        5. PRODUCT IMAGE REQUESTS: If the user asks to see an image/photo/picture of a product (e.g. "lihat gambar", "show image", "tampilkan foto"), always route to 'sales' — never refuse.
+        6. FOLLOW-UP REQUESTS: If the conversation already contains a product result and the user is asking a follow-up (price, stock, image), always route to 'sales'.
         """
     )
     # Pass full conversation history, but filter out internal routing tags
@@ -71,24 +73,52 @@ def supervisor_node(state: AgentState) -> dict:
     messages = [system_prompt] + filtered_messages
 
     structured_llm = llm_with_tools.with_structured_output(SupervisorRouting)
-    routing = structured_llm.invoke(messages)
-
-    logger.info(f"Supervisor routed to: {routing.destination} — {routing.reasoning}")
+    try:
+        routing = structured_llm.invoke(messages)
+        logger.info(f"Supervisor routed to: {routing.destination} — {routing.reasoning}")
+        destination = routing.destination.value
+    except Exception as e:
+        logger.error(f"Supervisor structured output failed: {e}. Defaulting to 'sales'.")
+        destination = "sales"
 
     # Store routing as internal metadata, not user-facing
-    return {"messages": [AIMessage(content=f"__ROUTE__:{routing.destination.value}")]}
+    return {"messages": [AIMessage(content=f"__ROUTE__:{destination}")]}
 
 
 async def sales_agent_node(state: AgentState) -> dict:
     """Sales agent: calls LLM with tools to handle sales queries."""
+    base_url = (settings.NGROK_URL or "http://localhost:8000").rstrip('/')
     system_prompt = SystemMessage(
-        content="""You are Printy, a Sales expert AI Assistant for FastPrint, specializing in printing raw materials and accessories.
+        content=f"""You are Printy, a warm and knowledgeable Sales AI Assistant for FastPrint, specializing in printing raw materials and accessories.
         DO NOT mention internal model names like OWL or ZOO.
         You have access to tools: search_products, get_available_pricelists, get_pricelist_detail, get_product_stock.
-        Use these tools to help the customer. Be warm, concise, and helpful.
-        When a user asks for a product price, first use get_available_pricelists to see the options. Present these options to the user interactively in plain text. Once the user selects an option, use get_pricelist_detail with the corresponding pricelist_id.
+        Use these tools to help the customer.
+
+        PRODUCT RESPONSE FORMAT (conversational prose, NOT a data form):
+        When the customer searches for or asks about a product, respond naturally as a human sales rep would.
+        Follow this structure in plain prose:
+        1. Introduce the product by its full name and mention the SKU in parentheses naturally (e.g. "...produk HEAD L210 (SKU: XXXXX)...").
+        2. Describe the FP (Toko Offline) pricing in one sentence covering both Jawa and Luar Jawa:
+           e.g. "Harga untuk toko offline (FP): Jawa Rp X.XXX.XXX dan Luar Jawa Rp X.XXX.XXX."
+           - FP Jawa  → pricelist_id 141
+           - FP Luar Jawa → pricelist_id 142
+        3. Describe the MP (Marketplace) pricing in one sentence covering both Jawa and Luar Jawa:
+           e.g. "Untuk marketplace (MP): Jawa Rp X.XXX.XXX dan Luar Jawa Rp X.XXX.XXX."
+           - MP Jawa → pricelist_id 112
+           - MP Luar Jawa → pricelist_id 121
+        4. If any price is not found, mention "tidak tersedia" naturally in the sentence.
+        5. DO NOT include the image URL anywhere in the text response. The platform will send the product photo automatically.
+        6. Always end with a warm, open-ended closing offer (e.g. "Ada yang ingin ditanyakan lebih lanjut?" or "Is there anything else I can help with?").
+
+        To fetch prices, use get_pricelist_detail with the product's SKU and the corresponding pricelist ID listed above. Call all four sequentially.
+
+        PRODUCT IMAGE FOLLOW-UP: If the customer asks to see the image/photo/picture of a product already found in this conversation
+        (e.g. "lihat gambarnya", "tampilkan foto", "show image", "kirim gambar"), look at the conversation history to find the SKU of the
+        last product discussed, then internally note the image URL as {base_url}/api/product/image/<sku_from_history> so the platform can send it.
+        Do NOT include the image URL in the text. Do NOT search again if the product was already found.
+
         Always respond in the same language the customer used.
-        Do NOT use any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text separated by natural paragraph breaks."""
+        Do NOT use any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text."""
     )
     # Filter out internal routing messages
     user_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and m.content.startswith("__ROUTE__:"))]
@@ -119,12 +149,12 @@ async def greeting_node(state: AgentState) -> dict:
     """Greeting node: LLM generates polite greeting in detected language."""
     system_prompt = SystemMessage(
         content="""You are Printy, a professional and highly competent AI Assistant for FastPrint.
-DO NOT mention internal model names like OWL or ZOO. You are strictly Printy from FastPrint.
-DO NOT use emojis, emoticons, tables, or any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text separated by natural paragraph breaks.
-Respond to the user's greeting in the same language they used.
-Briefly introduce yourself in a clear, plain-text paragraph format.
-Explain that you can assist with product search, checking real-time stock availability, tracking order status, and getting price information from specific pricelists.
-Keep it professional, clear, and concise."""
+        DO NOT mention internal model names like OWL or ZOO. You are strictly Printy from FastPrint.
+        DO NOT use emojis, emoticons, tables, or any Markdown formatting (no asterisks, no underscores, no bold, no italics). Output pure, unformatted plain text separated by natural paragraph breaks.
+        Respond to the user's greeting in the same language they used.
+        Briefly introduce yourself in a clear, plain-text paragraph format.
+        Explain that you can assist with product search, checking real-time stock availability, tracking order status, and getting price information from specific pricelists.
+        Keep it professional, clear, and concise."""
     )
     filtered_messages = [m for m in state["messages"] if not (isinstance(m, AIMessage) and str(m.content).startswith("__ROUTE__:"))]
     messages = [system_prompt] + filtered_messages
@@ -144,6 +174,7 @@ tool_node = ToolNode(tools)
 async def _send_response_node(state: AgentState) -> dict:
     """Send the final AI response to user via appropriate platform."""
     import json
+    import re
 
     def _extract_text(content) -> str:
         if isinstance(content, str):
@@ -164,7 +195,7 @@ async def _send_response_node(state: AgentState) -> dict:
             return " ".join(texts)
         return str(content)
 
-    # Find the last non-routing AI message (skip both new __ROUTE__: and old "Routing to:" formats)
+    # Find the last non-routing AI message
     last_message = None
     for msg in reversed(state["messages"]):
         if isinstance(msg, AIMessage):
@@ -182,19 +213,61 @@ async def _send_response_node(state: AgentState) -> dict:
     user_id = state["user_id"]
     platform = state["platform"]
 
-    response_content = ""
-    if isinstance(last_message, AIMessage):
-        response_content = _extract_text(last_message.content)
-    elif isinstance(last_message, ToolMessage):
-        response_content = f"I've processed your request. {_extract_text(last_message.content)}"
+    response_content = _extract_text(last_message.content)
+    
+    # Auto-detect product SKU from ToolMessages for Telegram images
+    image_url = None
+    if platform == "telegram":
+        base_url = (settings.NGROK_URL or "http://localhost:8000").rstrip('/')
+        detected_sku = None
 
-    if not response_content:
-        return {}
+        for msg in reversed(state["messages"]):
+            # ToolMessage may store tool name in .name or .tool_call_id — check content for search_products results
+            if not isinstance(msg, ToolMessage):
+                continue
+            try:
+                tool_result = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                # search_products returns: {"status": "success", "data": [...]}
+                if isinstance(tool_result, dict) and tool_result.get("status") == "success":
+                    data = tool_result.get("data", [])
+                    if data and isinstance(data, list):
+                        first = data[0]
+                        sku = first.get("variant_sku") or first.get("sku")
+                        if sku:
+                            detected_sku = sku
+                            break
+                # Alternatively a plain list
+                elif isinstance(tool_result, list) and tool_result:
+                    sku = tool_result[0].get("variant_sku") or tool_result[0].get("sku")
+                    if sku:
+                        detected_sku = sku
+                        break
+            except Exception:
+                continue
+
+        if detected_sku:
+            image_url = f"{base_url}/api/product/image/{detected_sku}"
+
+        # Fallback: check if LLM already wrote the URL in its response
+        if not image_url:
+            match = re.search(r'(https?://[^\s]+/api/product/image/[^\s\(\)\[\]\{\}\<\>]+)', response_content)
+            if match:
+                image_url = match.group(1)
 
     if platform == "whatsapp":
         await whatsapp_client.send_text_message(to=user_id, text=response_content)
     elif platform == "telegram":
-        await telegram_client.send_text_message(chat_id=user_id, text=response_content)
+        if image_url:
+            caption = re.sub(r'https?://[^\s]+/api/product/image/[^\s\(\)\[\]\{\}\<\>]+', '', response_content).strip()
+            if len(caption) > 1000:
+                caption = caption[:997] + "..."
+            try:
+                await telegram_client.send_photo(chat_id=user_id, photo=image_url, caption=caption if caption else "Detail Produk")
+            except Exception as photo_err:
+                logger.error(f"Failed to send photo: {photo_err}")
+                await telegram_client.send_text_message(chat_id=user_id, text=response_content)
+        else:
+            await telegram_client.send_text_message(chat_id=user_id, text=response_content)
 
     return {"messages": []}
 
